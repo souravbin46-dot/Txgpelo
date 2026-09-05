@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 🔥 ULTIMATE INDIAN IP FLOODER BOT – Railway Deploy Ready
-Features: Start/Stop/Status/Speed/Token/Email/Auto Report
 """
 import asyncio
 import aiohttp
@@ -24,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────
 BOT_TOKEN = "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo"
-ADMIN_ID = 8401097557
+
+# ─── YAHAN APNI REAL USER ID DALO ──────────────────────
+ADMIN_ID = 8401097557  # <-- ISKO APNI ID SE CHANGE KARO
 
 # ─── INDIAN IP RANGES ────────────────────────────────────
 INDIAN_RANGES = [
@@ -210,10 +211,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"❌ Errors: {f:,}\n"
            f"⚡ Rate: {rate:.1f} req/s\n"
            f"⏱️ Uptime: {int(elapsed)}s\n"
-           f"🔄 Running: {'✅ Yes' if running else '❌ No'}\n"
-           f"🇮🇳 Indian IPs: {len(INDIAN_RANGES)} ranges\n"
-           f"🔑 Tokens: {len(TOKENS)}\n"
-           f"⚡ Speed: {CONCURRENT} concurrent")
+           f"🔄 Running: {'✅ Yes' if running else '❌ No'}")
     await update.message.reply_text(msg)
 
 async def start_flooder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,7 +349,6 @@ async def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Auto Report every 30 seconds
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(auto_report_job, interval=30, first=10)
