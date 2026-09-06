@@ -217,7 +217,11 @@ async def main():
     app.add_handler(CommandHandler("setspeed", set_speed_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Bot Online**\n/start")
+    # Startup message
+    try:
+        await app.bot.send_message(chat_id=ADMIN_ID, text="🔥 **Bot Online**\n/start")
+    except:
+        logger.warning("Could not send startup message, bot will still work")
     
     await app.initialize()
     await app.start()
