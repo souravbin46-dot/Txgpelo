@@ -74,7 +74,7 @@ async def fetch_one(session, url, semaphore):
 async def flood_loop():
     global flood_active
     
-    CONCURRENT = 300
+    CONCURRENT = 200
     connector = aiohttp.TCPConnector(ssl=False, limit=0)
     semaphore = asyncio.Semaphore(CONCURRENT)
     url_cycle = cycle(URLS)
